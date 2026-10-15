@@ -6,8 +6,16 @@
   <div class="card shadow-sm">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
-        <h3 class="card-title mb-0">
-          <a href="/u/{{ post.user_id }}">{{ user_display(post.username) }}</a>
+        <h3 class="card-title mb-0 d-flex align-items-center">
+          <a href="/u/{{ post.user_id }}" class="me-2">{{ user_display(post.username) }}</a>
+          <!-- Post Author Badges (Icon Only) -->
+          {% if entry.post.monthly_done %}
+              <span class="ms-1" title="OG (Monthly Completed)">👑</span>
+          {% elif entry.post.weekly_done %}
+              <span class="ms-1" title="Rising Star (Weekly Completed)">⭐</span>
+          {% elif entry.post.daily_done %}
+              <span class="ms-1" title="Fresh Starter (Daily Completed)">🌱</span>
+          {% endif %}
         </h3>
         {% if session.get('user_id') == post.user_id %}
         <div class="d-flex align-items-center">
@@ -25,9 +33,8 @@
       
       <p class="card-text mt-2">{{ post.content }}</p>
 
-      <!-- Reactions Display and Add Reaction Button (Copied from feed.html.j2) -->
+      <!-- Reactions Display and Add Reaction Button -->
       <div class="d-flex align-items-center mt-2 mb-2">
-        <!-- Display existing reactions -->
         <div class="reactions-display me-2">
             {% if reactions %}
               {% for react in reactions %}
@@ -40,7 +47,6 @@
             {% endif %}
         </div>
 
-        <!-- Add Reaction Dropdown Button -->
         {% if session.get('user_id') %}
         <div class="dropdown">
           <button class="btn btn-sm btn-light text-dark rounded-circle m-0" type="button" id="dropdownMenuButton-{{ post.id }}" data-bs-toggle="dropdown" aria-expanded="false" title="Add Reaction">
@@ -72,7 +78,6 @@
           {% else %}
             <h4 class="mb-0">Comments</h4>
           {% endif %}
-          <!-- Add Comment Button (triggers modal) -->
           <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addCommentModal-{{ post.id }}">Add Comment</button>
       </div>
 
@@ -80,18 +85,29 @@
       <ul class="list-group list-group-flush shadow-none border-0">
         {% for comment in comments %}
         <li class="card shadow-none p-2 mt-2">
-          <div class="d-flex justify-content-between">
+          <div class="d-flex justify-content-between align-items-start">
             <div>
-              <strong><a href="/u/{{ comment.username }}">{{ user_display(comment.username) }}</a></strong>
+              <div class="d-flex align-items-center mb-1">
+                <strong class="me-2"><a href="/u/{{ comment.username }}">{{ user_display(comment.username) }}</a></strong>
+                
+                <!-- Comment Author Badges (Icon Only) -->
+                {% if comment.monthly_done %}
+                    <span class="ms-1" title="OG">👑</span>
+                {% elif comment.weekly_done %}
+                    <span class="ms-1" title="Rising Star">⭐</span>
+                {% elif comment.daily_done %}
+                    <span class="ms-1" title="Fresh Starter">🌱</span>
+                {% endif %}
+              </div>
+
               <p class="mb-0">{{ comment.content }}</p>
-              
+            </div>
             
             {% if session.get('user_id') == comment.user_id or session.get('user_id') == post.user_id %}
             <form action="{{ url_for('delete_comment', comment_id=comment.id) }}" method="POST" onsubmit="return confirm('Are you sure you want to delete this comment?');">
                 <button type="submit" class="btn btn-sm btn-danger" title="Delete Comment">delete</button>
             </form>
             {% endif %}
-
           </div>
         </li>
         {% endfor %}

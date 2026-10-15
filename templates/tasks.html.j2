@@ -1,0 +1,248 @@
+{% extends "base.html.j2" %}
+
+{% block content %}
+<style>
+    .task-card {
+        border: 2px solid #0d6efd;
+        background-color: #f0f7ff; /* Soft blue background */
+    }
+    
+    /* Force headers to be solid blue/gray, overriding any default gradients */
+    .task-header-blue {
+        background-color: #0d6efd !important;
+        background-image: none !important; 
+        color: white !important;
+    }
+    .task-header-locked {
+        background-color: #6c757d !important;
+        background-image: none !important;
+        color: white !important;
+    }
+
+    .timeline-container {
+        position: relative;
+        margin: 20px 5% 0 5%;
+    }
+
+    /* Background empty line */
+    .timeline-track {
+        position: absolute;
+        top: 15px; /* Aligns exactly with the center of the 30px checkbox */
+        left: 0;
+        right: 0;
+        height: 4px;
+        background-color: #d1e3ff;
+        z-index: 1;
+    }
+
+    /* Foreground filled line */
+    .timeline-fill {
+        position: absolute;
+        top: 15px;
+        left: 0;
+        height: 4px;
+        background-color: #0d6efd;
+        z-index: 2;
+        transition: width 0.4s ease;
+    }
+
+    .timeline-step {
+        position: relative;
+        z-index: 3;
+        background-color: #f0f7ff; /* Matches card background to hide the line behind it */
+        padding: 0 10px;
+        display: flex;
+        flex-direction: column; /* Forces text to sit under the checkbox */
+        align-items: center;
+    }
+
+    .timeline-checkbox {
+        width: 30px;
+        height: 30px;
+        margin: 0;
+        cursor: default;
+    }
+</style>
+
+<div class="container mt-4">
+    <h2 class="mb-4 text-primary">My Tasks</h2>
+
+    <!-- Daily Tasks -->
+    <div class="card mb-4 task-card">
+        <div class="card-header task-header-blue">
+            <h3 class="mb-0">Daily Challenge (8 Days)</h4>
+        </div>
+        <div class="card-body text-center">
+            <p class="mb-4">Post once every 2 days to complete this challenge and unlock the Weekly tasks!</p>
+            
+            <div class="timeline-container">
+                <!-- Lines -->
+                <div class="timeline-track"></div>
+                
+                <!-- Logic to calculate line width -->
+                {% set p_width = 0 %}
+                {% if windows[3] %}{% set p_width = 100 %}
+                {% elif windows[2] %}{% set p_width = 66.66 %}
+                {% elif windows[1] %}{% set p_width = 33.33 %}
+                {% endif %}
+                
+                <div class="timeline-fill" style="width: {{ p_width }}%;"></div>
+                
+                <!-- Steps -->
+                <div class="d-flex justify-content-between position-relative">
+                    <div class="timeline-step">
+                        <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if windows[0] %}checked{% endif %}>
+                        <div class="mt-2 fw-bold text-primary">Days 1-2</div>
+                    </div>
+                    <div class="timeline-step">
+                        <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if windows[1] %}checked{% endif %}>
+                        <div class="mt-2 fw-bold text-primary">Days 3-4</div>
+                    </div>
+                    <div class="timeline-step">
+                        <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if windows[2] %}checked{% endif %}>
+                        <div class="mt-2 fw-bold text-primary">Days 5-6</div>
+                    </div>
+                    <div class="timeline-step">
+                        <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if windows[3] %}checked{% endif %}>
+                        <div class="mt-2 fw-bold text-primary">Days 7-8</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Weekly Tasks -->
+    <div class="card mb-4 task-card">
+        <div class="card-header {% if weekly_unlocked %}task-header-blue{% else %}task-header-locked{% endif %}">
+            <h4 class="mb-0">
+                Weekly Tasks 
+                {% if not weekly_unlocked %}<span class="badge bg-light text-dark float-end">🔒 Locked</span>{% endif %}
+            </h4>
+        </div>
+        <div class="card-body text-center">
+            {% if weekly_unlocked %}
+                <p class="mb-4">Post at least once a week to complete this challenge and unlock the Monthly tasks!</p>
+                
+                <div class="timeline-container">
+                    <div class="timeline-track"></div>
+                    
+                    {% set w_width = 0 %}
+                    {% if weekly_windows[3] %}{% set w_width = 100 %}
+                    {% elif weekly_windows[2] %}{% set w_width = 66.66 %}
+                    {% elif weekly_windows[1] %}{% set w_width = 33.33 %}
+                    {% endif %}
+                    
+                    <div class="timeline-fill" style="width: {{ w_width }}%;"></div>
+                    
+                    <div class="d-flex justify-content-between position-relative">
+                        <div class="timeline-step">
+                            <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if weekly_windows[0] %}checked{% endif %}>
+                            <div class="mt-2 fw-bold text-primary">Week 1</div>
+                        </div>
+                        <div class="timeline-step">
+                            <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if weekly_windows[1] %}checked{% endif %}>
+                            <div class="mt-2 fw-bold text-primary">Week 2</div>
+                        </div>
+                        <div class="timeline-step">
+                            <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if weekly_windows[2] %}checked{% endif %}>
+                            <div class="mt-2 fw-bold text-primary">Week 3</div>
+                        </div>
+                        <div class="timeline-step">
+                            <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if weekly_windows[3] %}checked{% endif %}>
+                            <div class="mt-2 fw-bold text-primary">Week 4</div>
+                        </div>
+                    </div>
+                </div>
+            {% else %}
+                <p class="text-muted text-start">Complete the Daily Challenge to unlock these tasks.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Monthly Tasks -->
+    <div class="card mb-4 task-card">
+        <div class="card-header {% if monthly_unlocked %}task-header-blue{% else %}task-header-locked{% endif %}">
+            <h4 class="mb-0">
+                Monthly Tasks 
+                {% if not monthly_unlocked %}<span class="badge bg-light text-dark float-end">🔒 Locked</span>{% endif %}
+            </h4>
+        </div>
+        <div class="card-body text-center">
+            {% if monthly_unlocked %}
+                <p class="mb-4">Post at least once a month for 3 months to complete the ultimate challenge!</p>
+                
+                <div class="timeline-container">
+                    <div class="timeline-track"></div>
+                    
+                    {% set m_width = 0 %}
+                    {% if monthly_windows[2] %}{% set m_width = 100 %}
+                    {% elif monthly_windows[1] %}{% set m_width = 50 %}
+                    {% endif %}
+                    
+                    <div class="timeline-fill" style="width: {{ m_width }}%;"></div>
+                    
+                    <div class="d-flex justify-content-between position-relative">
+                        <div class="timeline-step">
+                            <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if monthly_windows[0] %}checked{% endif %}>
+                            <div class="mt-2 fw-bold text-primary">Month 1</div>
+                        </div>
+                        <div class="timeline-step">
+                            <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if monthly_windows[1] %}checked{% endif %}>
+                            <div class="mt-2 fw-bold text-primary">Month 2</div>
+                        </div>
+                        <div class="timeline-step">
+                            <input class="form-check-input timeline-checkbox" type="checkbox" disabled {% if monthly_windows[2] %}checked{% endif %}>
+                            <div class="mt-2 fw-bold text-primary">Month 3</div>
+                        </div>
+                    </div>
+                </div>
+            {% else %}
+                <p class="text-muted text-start">Complete the Weekly Tasks to unlock these tasks.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Community Task Progress Stats -->
+    <!-- Community Progress & Personal Standing -->
+    <div class="card mb-4 task-card">
+        <div class="card-header task-header-blue">
+            <h4 class="mb-0">Community Standing</h4>
+        </div>
+        <div class="card-body">
+            <ul class="list-unstyled mb-0">
+                <!-- Daily / Fresh Starter -->
+                <li class="mb-3">
+                    🌱 <strong>Fresh Starter Badge:</strong> 
+                    {% if user_has_daily %}
+                        <span class="text-success fw-bold">You are among the {{ daily_pct }}% of users who unlocked this!</span>
+                    {% else %}
+                        <span class="text-muted">You haven't unlocked this yet. Join the {{ daily_pct }}% of users who achieved it!</span>
+                    {% endif %}
+                </li>
+
+                <!-- Weekly / Rising Star -->
+                <li class="mb-3">
+                    ⭐ <strong>Rising Star Badge:</strong> 
+                    {% if user_has_weekly %}
+                        <span class="text-success fw-bold">You are among the elite {{ weekly_pct }}% of users who unlocked this!</span>
+                    {% else %}
+                        <span class="text-muted">Locked. Only {{ weekly_pct }}% of users have reached this milestone.</span>
+                    {% endif %}
+                </li>
+
+                <!-- Monthly / OG -->
+                <li>
+                    👑 <strong>OG Badge:</strong> 
+                    {% if user_has_monthly %}
+                        <span class="text-success fw-bold">Incredible! You are among the top {{ monthly_pct }}% OG users!</span>
+                    {% else %}
+                        <span class="text-muted">Locked. {{ monthly_pct }}% of users have earned the ultimate OG status.</span>
+                    {% endif %}
+                </li>
+            </ul>
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}

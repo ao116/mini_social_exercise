@@ -97,7 +97,7 @@ REACTION_TYPES = list(REACTION_EMOJIS.keys())
 
 @app.route('/')
 def feed():
-    #  1. Get Pagination and Filter Parameters 
+    # 1. Get Pagination and Filter Parameters 
     try:
         page = int(request.args.get('page', 1))
     except ValueError:
@@ -112,7 +112,7 @@ def feed():
     current_user_id = session.get('user_id')
     params = []
 
-    #  2. Build the Query 
+    # 2. Build the Query 
     where_clause = ""
     if show == 'following' and current_user_id:
         where_clause = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
@@ -124,9 +124,13 @@ def feed():
     if sort == 'popular':
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
-                   IFNULL(r.total_reactions, 0) as total_reactions
+                   IFNULL(r.total_reactions, 0) as total_reactions,
+                   IFNULL(t.weekly_unlocked, 0) as daily_done,
+                   IFNULL(t.monthly_unlocked, 0) as weekly_done,
+                   IFNULL(t.monthly_completed, 0) as monthly_done
             FROM posts p
             JOIN users u ON p.user_id = u.id
+            LEFT JOIN user_tasks t ON u.id = t.user_id
             LEFT JOIN (
                 SELECT post_id, COUNT(*) as total_reactions FROM reactions GROUP BY post_id
             ) r ON p.id = r.post_id
@@ -140,9 +144,13 @@ def feed():
         posts = recommend(current_user_id, show == 'following' and current_user_id)
     else:  # Default sort is 'new'
         query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+                   IFNULL(t.weekly_unlocked, 0) as daily_done,
+                   IFNULL(t.monthly_unlocked, 0) as weekly_done,
+                   IFNULL(t.monthly_completed, 0) as monthly_done
             FROM posts p
             JOIN users u ON p.user_id = u.id
+            LEFT JOIN user_tasks t ON u.id = t.user_id
             {where_clause}
             ORDER BY p.created_at DESC
             LIMIT ? OFFSET ?
@@ -175,7 +183,20 @@ def feed():
                 user_reaction = reaction_check['reaction_type']
 
         reactions = query_db('SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type', (post['id'],))
-        comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post['id'],))
+        
+        # Comments query with badge joins included
+        comments_raw = query_db("""
+            SELECT c.id, c.content, c.created_at, u.username, u.id as user_id,
+                   IFNULL(t.weekly_unlocked, 0) as daily_done,
+                   IFNULL(t.monthly_unlocked, 0) as weekly_done,
+                   IFNULL(t.monthly_completed, 0) as monthly_done
+            FROM comments c 
+            JOIN users u ON c.user_id = u.id 
+            LEFT JOIN user_tasks t ON u.id = t.user_id 
+            WHERE c.post_id = ? 
+            ORDER BY c.created_at ASC
+        """, (post['id'],))
+        
         post_dict = dict(post)
         post_dict['content'], _ = moderate_content(post_dict['content'])
         comments_moderated = []
@@ -183,6 +204,7 @@ def feed():
             comment_dict = dict(comment)
             comment_dict['content'], _ = moderate_content(comment_dict['content'])
             comments_moderated.append(comment_dict)
+            
         posts_data.append({
             'post': post_dict,
             'reactions': reactions,
@@ -191,16 +213,17 @@ def feed():
             'comments': comments_moderated
         })
 
-    #  4. Render Template with Pagination Info 
+    # 4. Render Template with Pagination Info 
     return render_template('feed.html.j2', 
                            posts=posts_data, 
                            current_sort=sort,
                            current_show=show,
-                           page=page, # Pass current page number
-                           per_page=POSTS_PER_PAGE, # Pass items per page
+                           page=page,
+                           per_page=POSTS_PER_PAGE,
                            reaction_emojis=REACTION_EMOJIS,
                            reaction_types=REACTION_TYPES)
 
+                           
 @app.route('/posts/new', methods=['POST'])
 def add_post():
     """Handles creating a new post from the feed."""
@@ -864,7 +887,323 @@ def loop_color(user_id):
     g = int(h[2:4], 16)
     b = int(h[4:6], 16)
     return f'rgb({r % 128 + 80}, {g % 128 + 80}, {b % 128 + 80})'
+# --- assignment #1
+from datetime import datetime, timedelta
+def init_task_table():
+    """Creates the user_tasks table or updates it with new columns if it already exists."""
+    with app.app_context():
+        db = get_db()
+        
+        # 1. Create the table with all columns (for completely new setups)
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS user_tasks (
+                user_id INTEGER PRIMARY KEY,
+                start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                weekly_unlocked BOOLEAN DEFAULT 0,
+                monthly_unlocked BOOLEAN DEFAULT 0,
+                monthly_completed BOOLEAN DEFAULT 0
+            )
+        ''')
+        
+        # 2. Safely add the new column for existing databases
+        try:
+            db.execute('ALTER TABLE user_tasks ADD COLUMN monthly_completed BOOLEAN DEFAULT 0')
+        except sqlite3.OperationalError:
+            # If the column already exists, SQLite throws an error. We just ignore it and move on.
+            pass
+            
+        db.commit()
+    
+@app.route('/tasks')
+def tasks():
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to view tasks.', 'danger')
+        return redirect(url_for('login'))
 
+    db = get_db()
+    
+    task_data = query_db('SELECT * FROM user_tasks WHERE user_id = ?', (user_id,), one=True)
+    if not task_data:
+        db.execute('INSERT INTO user_tasks (user_id) VALUES (?)', (user_id,))
+        db.commit()
+        task_data = {'weekly_unlocked': 0, 'monthly_unlocked': 0}
+
+    weekly_unlocked = task_data['weekly_unlocked']
+    monthly_unlocked = task_data['monthly_unlocked']
+    
+    windows = [False, False, False, False]
+    weekly_windows = [False, False, False, False]
+    monthly_windows = [False, False, False] # 3 months
+    
+    posts = query_db('SELECT created_at FROM posts WHERE user_id = ? ORDER BY created_at ASC', (user_id,))
+    
+    # --- DAILY TASKS LOGIC (48 hours) ---
+    if weekly_unlocked:
+        windows = [True, True, True, True]
+    elif posts:
+        streak_start = None
+        highest_window_reached = -1
+        
+        for post in posts:
+            post_time = post['created_at']
+            if isinstance(post_time, str):
+                post_time = datetime.strptime(post_time, '%Y-%m-%d %H:%M:%S')
+            
+            if streak_start is None:
+                streak_start = post_time
+                highest_window_reached = 0
+                continue
+            
+            hours_since_start = (post_time - streak_start).total_seconds() / 3600.0
+            window_index = int(hours_since_start // 48)
+            
+            if window_index == highest_window_reached:
+                pass
+            elif window_index == highest_window_reached + 1:
+                highest_window_reached = window_index
+                if highest_window_reached == 3:
+                    break
+            elif window_index > highest_window_reached + 1:
+                streak_start = post_time
+                highest_window_reached = 0
+        
+        if highest_window_reached < 3 and streak_start is not None:
+            now = datetime.utcnow()
+            hours_since_start_now = (now - streak_start).total_seconds() / 3600.0
+            current_expected_window = int(hours_since_start_now // 48)
+            if current_expected_window > highest_window_reached + 1:
+                highest_window_reached = -1
+        
+        for i in range(4):
+            if i <= highest_window_reached:
+                windows[i] = True
+
+        if all(windows):
+            db.execute('UPDATE user_tasks SET weekly_unlocked = 1 WHERE user_id = ?', (user_id,))
+            db.commit()
+            weekly_unlocked = 1
+
+    # --- WEEKLY TASKS LOGIC (168 hours) ---
+    if monthly_unlocked:
+        weekly_windows = [True, True, True, True]
+    elif weekly_unlocked and posts:
+        w_streak_start = None
+        w_highest_window = -1
+        
+        for post in posts:
+            post_time = post['created_at']
+            if isinstance(post_time, str):
+                post_time = datetime.strptime(post_time, '%Y-%m-%d %H:%M:%S')
+            
+            if w_streak_start is None:
+                w_streak_start = post_time
+                w_highest_window = 0
+                continue
+            
+            hours_since_start = (post_time - w_streak_start).total_seconds() / 3600.0
+            window_index = int(hours_since_start // 168)
+            
+            if window_index == w_highest_window:
+                pass
+            elif window_index == w_highest_window + 1:
+                w_highest_window = window_index
+                if w_highest_window == 3:
+                    break
+            elif window_index > w_highest_window + 1:
+                w_streak_start = post_time
+                w_highest_window = 0
+                
+        if w_highest_window < 3 and w_streak_start is not None:
+            now = datetime.utcnow()
+            hours_now = (now - w_streak_start).total_seconds() / 3600.0
+            current_w_window = int(hours_now // 168)
+            if current_w_window > w_highest_window + 1:
+                w_highest_window = -1
+                
+        for i in range(4):
+            if i <= w_highest_window:
+                weekly_windows[i] = True
+                
+        if all(weekly_windows):
+            db.execute('UPDATE user_tasks SET monthly_unlocked = 1 WHERE user_id = ?', (user_id,))
+            db.commit()
+            monthly_unlocked = 1
+
+    # --- MONTHLY TASKS LOGIC (720 hours / 30 days) ---
+    if monthly_unlocked and posts:
+        m_streak_start = None
+        m_highest_window = -1
+        
+        for post in posts:
+            post_time = post['created_at']
+            if isinstance(post_time, str):
+                post_time = datetime.strptime(post_time, '%Y-%m-%d %H:%M:%S')
+            
+            if m_streak_start is None:
+                m_streak_start = post_time
+                m_highest_window = 0
+                continue
+            
+            hours_since_start = (post_time - m_streak_start).total_seconds() / 3600.0
+            window_index = int(hours_since_start // 720) 
+            
+            if window_index == m_highest_window:
+                pass
+            elif window_index == m_highest_window + 1:
+                m_highest_window = window_index
+                if m_highest_window == 2: # 3 months total
+                    break
+            elif window_index > m_highest_window + 1:
+                m_streak_start = post_time
+                m_highest_window = 0
+                
+        if m_highest_window < 2 and m_streak_start is not None:
+            now = datetime.utcnow()
+            hours_now = (now - m_streak_start).total_seconds() / 3600.0
+            current_m_window = int(hours_now // 720)
+            if current_m_window > m_highest_window + 1:
+                m_highest_window = -1
+                
+        for i in range(3):
+            if i <= m_highest_window:
+                monthly_windows[i] = True
+
+        if all(monthly_windows):
+            db.execute('UPDATE user_tasks SET monthly_completed = 1 WHERE user_id = ?', (user_id,))
+            db.commit()
+
+    # --- AUTO-CHECK ALL USERS' TASKS BEFORE SHOWING STATS ---
+    all_users = query_db('SELECT id FROM users')
+    for u in all_users:
+        u_id = u['id']
+        
+        # Ensure user has a task row
+        t_row = query_db('SELECT * FROM user_tasks WHERE user_id = ?', (u_id,), one=True)
+        if not t_row:
+            db.execute('INSERT INTO user_tasks (user_id) VALUES (?)', (u_id,))
+            db.commit()
+            t_row = {'weekly_unlocked': 0, 'monthly_unlocked': 0, 'monthly_completed': 0}
+            
+        # If not fully completed, check their posts to see if they earned unlocks
+        if not t_row['monthly_completed']:
+            u_posts = query_db('SELECT created_at FROM posts WHERE user_id = ? ORDER BY created_at ASC', (u_id,))
+            if u_posts:
+                # 1. Check Daily (48h windows)
+                streak_start = None
+                h_window = -1
+                d_done = False
+                
+                for post in u_posts:
+                    p_time = post['created_at']
+                    if isinstance(p_time, str):
+                        p_time = datetime.strptime(p_time, '%Y-%m-%d %H:%M:%S')
+                    if streak_start is None:
+                        streak_start = p_time
+                        h_window = 0
+                        continue
+                    hours = (p_time - streak_start).total_seconds() / 3600.0
+                    w_idx = int(hours // 48)
+                    if w_idx == h_window + 1:
+                        h_window = w_idx
+                        if h_window == 3:
+                            break
+                    elif w_idx > h_window + 1:
+                        streak_start = p_time
+                        h_window = 0
+                
+                if h_window == 3:
+                    db.execute('UPDATE user_tasks SET weekly_unlocked = 1 WHERE user_id = ?', (u_id,))
+                    db.commit()
+                    d_done = True
+                
+                # 2. Check Weekly (168h windows) if daily was done
+                if t_row['weekly_unlocked'] == 1 or d_done:
+                    w_streak_start = None
+                    w_h_window = -1
+                    w_done = False
+                    
+                    for post in u_posts:
+                        p_time = post['created_at']
+                        if isinstance(p_time, str):
+                            p_time = datetime.strptime(p_time, '%Y-%m-%d %H:%M:%S')
+                        if w_streak_start is None:
+                            w_streak_start = p_time
+                            w_h_window = 0
+                            continue
+                        hours = (p_time - w_streak_start).total_seconds() / 3600.0
+                        w_idx = int(hours // 168)
+                        if w_idx == w_h_window + 1:
+                            w_h_window = w_idx
+                            if w_h_window == 3:
+                                break
+                        elif w_idx > w_h_window + 1:
+                            w_streak_start = p_time
+                            w_h_window = 0
+                            
+                    if w_h_window == 3:
+                        db.execute('UPDATE user_tasks SET monthly_unlocked = 1 WHERE user_id = ?', (u_id,))
+                        db.commit()
+                        w_done = True
+
+                    # 3. Check Monthly (720h windows) if weekly was done
+                    if t_row['monthly_unlocked'] == 1 or w_done:
+                        m_streak_start = None
+                        m_h_window = -1
+                        
+                        for post in u_posts:
+                            p_time = post['created_at']
+                            if isinstance(p_time, str):
+                                p_time = datetime.strptime(p_time, '%Y-%m-%d %H:%M:%S')
+                            if m_streak_start is None:
+                                m_streak_start = p_time
+                                m_h_window = 0
+                                continue
+                            hours = (p_time - m_streak_start).total_seconds() / 3600.0
+                            w_idx = int(hours // 720)
+                            if w_idx == m_h_window + 1:
+                                m_h_window = w_idx
+                                if m_h_window == 2:
+                                    break
+                            elif w_idx > m_h_window + 1:
+                                m_streak_start = p_time
+                                m_h_window = 0
+                                
+                        if m_h_window == 2:
+                            db.execute('UPDATE user_tasks SET monthly_completed = 1 WHERE user_id = ?', (u_id,))
+                            db.commit()
+
+    # --- COMMUNITY STATS & USER PERCENTAGES ---
+    total_users_count = query_db('SELECT COUNT(id) as cnt FROM users', one=True)['cnt']
+    
+    # Counts
+    daily_completed_count = query_db('SELECT COUNT(user_id) as cnt FROM user_tasks WHERE weekly_unlocked = 1', one=True)['cnt']
+    weekly_completed_count = query_db('SELECT COUNT(user_id) as cnt FROM user_tasks WHERE monthly_unlocked = 1', one=True)['cnt']
+    monthly_completed_count = query_db('SELECT COUNT(user_id) as cnt FROM user_tasks WHERE monthly_completed = 1', one=True)['cnt']
+    
+    # Calculate percentages (prevent division by zero if total_users is 0)
+    daily_pct = round((daily_completed_count / total_users_count) * 100) if total_users_count > 0 else 0
+    weekly_pct = round((weekly_completed_count / total_users_count) * 100) if total_users_count > 0 else 0
+    monthly_pct = round((monthly_completed_count / total_users_count) * 100) if total_users_count > 0 else 0
+    
+    # Check current user's personal completion status
+    current_user_task = query_db('SELECT * FROM user_tasks WHERE user_id = ?', (user_id,), one=True)
+    user_has_daily = current_user_task['weekly_unlocked'] == 1 if current_user_task else False
+    user_has_weekly = current_user_task['monthly_unlocked'] == 1 if current_user_task else False
+    user_has_monthly = current_user_task['monthly_completed'] == 1 if current_user_task else False
+
+    return render_template('tasks.html.j2', 
+                           windows=windows, 
+                           weekly_windows=weekly_windows,
+                           monthly_windows=monthly_windows,
+                           weekly_unlocked=weekly_unlocked, 
+                           monthly_unlocked=monthly_unlocked,
+                           daily_pct=daily_pct,
+                           weekly_pct=weekly_pct,
+                           monthly_pct=monthly_pct,
+                           user_has_daily=user_has_daily,
+                           user_has_weekly=user_has_weekly,
+                           user_has_monthly=user_has_monthly)
 
 # ----- Functions to be implemented are below
 # Coding Assignment #2
@@ -939,5 +1278,6 @@ def recommend(user_id, filter_following):
     return recommended_posts;
 
 if __name__ == '__main__':
+    init_task_table()
     app.run(debug=True, port=8080)
 
