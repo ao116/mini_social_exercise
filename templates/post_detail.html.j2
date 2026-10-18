@@ -1,6 +1,6 @@
 {% extends "base.html.j2" %}
 {% block content %}
-{% from "macros/user_macros.html.j2" import user_display %}
+{% from "macros/user_macros.html.j2" import user_display, streak_badge_icon %}
 
 <div class="col-md-8 mx-auto pt-4">
   <div class="card shadow-sm">
@@ -9,13 +9,14 @@
         <h3 class="card-title mb-0 d-flex align-items-center">
           <a href="/u/{{ post.user_id }}" class="me-2">{{ user_display(post.username) }}</a>
           <!-- Post Author Badges (Icon Only) -->
-          {% if entry.post.monthly_done %}
+          {% if post.monthly_done %}
               <span class="ms-1" title="OG (Monthly Completed)">👑</span>
-          {% elif entry.post.weekly_done %}
+          {% elif post.weekly_done %}
               <span class="ms-1" title="Rising Star (Weekly Completed)">⭐</span>
-          {% elif entry.post.daily_done %}
+          {% elif post.daily_done %}
               <span class="ms-1" title="Fresh Starter (Daily Completed)">🌱</span>
           {% endif %}
+          {{ streak_badge_icon(post.user_id) }}
         </h3>
         {% if session.get('user_id') == post.user_id %}
         <div class="d-flex align-items-center">
@@ -98,6 +99,7 @@
                 {% elif comment.daily_done %}
                     <span class="ms-1" title="Fresh Starter">🌱</span>
                 {% endif %}
+                {{ streak_badge_icon(comment.user_id) }}
               </div>
 
               <p class="mb-0">{{ comment.content }}</p>

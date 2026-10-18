@@ -1,10 +1,30 @@
 {% extends "base.html.j2" %}
 {% block content %}
-{% from "macros/user_macros.html.j2" import user_display %}
+{% from "macros/user_macros.html.j2" import user_display, streak_badge_icon %}
 
 <div class="align-center text-center">
   <img src="{{ url_for('static', filename='icon.png') }}" alt="Logo" style="height: 64px;" class="mb-4">
 </div>
+
+<!-- Community Pulse: normative statistics + the viewer's own clean streak -->
+{% if pulse.show or my_streak %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="alert alert-success shadow-sm mb-0 d-flex flex-wrap justify-content-between align-items-center gap-2">
+    {% if pulse.show %}
+    <div>
+      💚 <strong>{{ pulse.clean_pct }}% of posts and comments on Mini Social are respectful.</strong>
+      Join {{ pulse.clean_members }} members keeping our community friendly.
+    </div>
+    {% endif %}
+    {% if my_streak %}
+    <div class="text-nowrap" title="Posts and comments in a row without any rule violations">
+      🔥 Your clean streak: <strong>{{ my_streak.current }}</strong>
+      {% if my_streak.badge %}<span class="ms-1">{{ my_streak.badge[1] }} {{ my_streak.badge[2] }}</span>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 
 {% if session.get('user_id') %}
 <div class="col-md-8 mx-auto mb-4">
@@ -62,6 +82,7 @@
         {% elif entry.post.daily_done %}
             <span class="ms-1" title="Fresh Starter (Daily Completed)">🌱</span>
         {% endif %}
+        {{ streak_badge_icon(entry.post.user_id) }}
         </h3>
 
         {% if session.get('user_id') == entry.post.user_id %}
@@ -143,6 +164,7 @@
                 {% elif comment.daily_done %}
                     <span class="ms-1" title="Fresh Starter">🌱</span>
                 {% endif %}
+                {{ streak_badge_icon(comment.user_id) }}
               </div>
               <p class="mb-0">{{ comment.content }}</p>
             </div>

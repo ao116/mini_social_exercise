@@ -7,3 +7,10 @@
     <span>@{{ user_id }}</span>
   </a>
 {% endmacro %}
+
+{% macro streak_badge_icon(user_id) %}
+  {% set badge = streak_badge(user_id) %}
+  {% if badge %}
+    <span class="ms-1" title="{{ badge[2] }}: {{ badge[0] }}+ posts & comments in a row without violations">{{ badge[1] }}</span>
+  {% endif %}
+{% endmacro %}

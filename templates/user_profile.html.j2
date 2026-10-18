@@ -17,6 +17,25 @@
           </p>
           <p class="card-text">{{ user.profile or "No profile information provided." }}</p>
 
+          <!-- Clean Streak: reputation for consecutive violation-free content -->
+          <div class="border rounded p-3 my-3">
+            <div class="d-flex justify-content-between align-items-center">
+              <div>
+                🔥 Clean streak: <strong>{{ streak.current }}</strong> posts &amp; comments in a row without violations
+                <br><small class="text-muted">Best streak: {{ streak.best }}</small>
+              </div>
+              {% if streak.badge %}
+              <span class="fs-5" title="Clean streak badge">{{ streak.badge[1] }} {{ streak.badge[2] }}</span>
+              {% endif %}
+            </div>
+            {% if streak.next_badge %}
+            <div class="progress mt-2" style="height: 6px;">
+              <div class="progress-bar bg-success" role="progressbar" style="width: {{ streak.progress_pct }}%;"></div>
+            </div>
+            <small class="text-muted">{{ streak.next_badge[0] - streak.current }} more to unlock {{ streak.next_badge[1] }} {{ streak.next_badge[2] }}</small>
+            {% endif %}
+          </div>
+
          {% if session.user_id and session.user_id != user.id %}
             <div class="my-3">
               {# The logic is now a simple boolean check #}

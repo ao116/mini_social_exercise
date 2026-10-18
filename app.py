@@ -6,6 +6,7 @@ import json
 import sqlite3
 import hashlib
 import re
+import time
 from datetime import datetime
 
 app = Flask(__name__)
@@ -214,8 +215,10 @@ def feed():
         })
 
     # 4. Render Template with Pagination Info 
-    return render_template('feed.html.j2', 
-                           posts=posts_data, 
+    return render_template('feed.html.j2',
+                           posts=posts_data,
+                           pulse=community_pulse(),
+                           my_streak=clean_streak(current_user_id) if current_user_id else None,
                            current_sort=sort,
                            current_show=show,
                            page=page,
@@ -343,7 +346,8 @@ def user_profile(username):
                            comments=comments,
                            followers_count=followers_count, 
                            following_count=following_count,
-                           is_following=is_currently_following)
+                           is_following=is_currently_following,
+                           streak=clean_streak(user['id']))
     
 
 @app.route('/u/<username>/followers')
@@ -377,9 +381,13 @@ def post_detail(post_id):
     """Displays a single post and its comments, with content moderation applied."""
     
     post_raw = query_db('''
-        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+               IFNULL(t.weekly_unlocked, 0) as daily_done,
+               IFNULL(t.monthly_unlocked, 0) as weekly_done,
+               IFNULL(t.monthly_completed, 0) as monthly_done
         FROM posts p
         JOIN users u ON p.user_id = u.id
+        LEFT JOIN user_tasks t ON u.id = t.user_id
         WHERE p.id = ?
     ''', (post_id,), one=True)
 
@@ -403,7 +411,17 @@ def post_detail(post_id):
     ''', (post_id,))
 
     #  Fetch and Moderate Comments 
-    comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post_id,))
+    comments_raw = query_db("""
+        SELECT c.id, c.content, c.created_at, u.username, u.id as user_id,
+               IFNULL(t.weekly_unlocked, 0) as daily_done,
+               IFNULL(t.monthly_unlocked, 0) as weekly_done,
+               IFNULL(t.monthly_completed, 0) as monthly_done
+        FROM comments c
+        JOIN users u ON c.user_id = u.id
+        LEFT JOIN user_tasks t ON u.id = t.user_id
+        WHERE c.post_id = ?
+        ORDER BY c.created_at ASC
+    """, (post_id,))
     
     comments = [] # Create a new list for the moderated comments
     for comment_raw in comments_raw:
@@ -1205,6 +1223,89 @@ def tasks():
                            user_has_weekly=user_has_weekly,
                            user_has_monthly=user_has_monthly)
 
+# --- Assignment 2.3: Design Claim - Normative Statistics + Reputation Systems
+# Shows how common good behaviour is (community pulse) and rewards each user's
+# run of violation-free content (clean streak). Only good behaviour is put on
+# display, since showing many violations makes misbehaviour look normal.
+
+CLEAN_STREAK_BADGES = [  # (streak needed, icon, title), highest first
+    (100, '🏆', 'Community Pillar'),
+    (50, '🛡️', 'Guardian'),
+    (10, '🕊️', 'Peacekeeper'),
+]
+PULSE_CACHE_SECONDS = 300
+PULSE_MIN_CLEAN_PCT = 50  # below this the "norm" isn't the majority, so don't advertise it
+_pulse_cache = {'time': 0, 'data': None}
+
+def community_pulse():
+    """Returns the share of all posts/comments with no violations and the number of
+    members whose content is entirely clean. Cached, as it scores every item."""
+    now = time.time()
+    if _pulse_cache['data'] and now - _pulse_cache['time'] < PULSE_CACHE_SECONDS:
+        return _pulse_cache['data']
+
+    rows = query_db('''
+        SELECT user_id, content FROM posts
+        UNION ALL
+        SELECT user_id, content FROM comments
+    ''') or []
+
+    clean_items = 0
+    authors, authors_with_violations = set(), set()
+    for row in rows:
+        authors.add(row['user_id'])
+        if moderate_content(row['content'])[1] == 0:
+            clean_items += 1
+        else:
+            authors_with_violations.add(row['user_id'])
+
+    total = len(rows)
+    clean_pct = round(clean_items / total * 100) if total else 100
+    data = {
+        'clean_pct': clean_pct,
+        'clean_members': len(authors - authors_with_violations),
+        'show': clean_pct >= PULSE_MIN_CLEAN_PCT,
+    }
+    _pulse_cache.update(time=now, data=data)
+    return data
+
+def clean_streak(user_id):
+    """Returns the user's current and best run of consecutive violation-free
+    posts/comments, their current badge, and the next badge to aim for."""
+    rows = query_db('''
+        SELECT content, created_at FROM posts WHERE user_id = ?
+        UNION ALL
+        SELECT content, created_at FROM comments WHERE user_id = ?
+        ORDER BY created_at ASC
+    ''', (user_id, user_id)) or []
+
+    current = best = 0
+    for row in rows:
+        if moderate_content(row['content'])[1] == 0:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+
+    badge = next((b for b in CLEAN_STREAK_BADGES if current >= b[0]), None)
+    next_badge = next((b for b in reversed(CLEAN_STREAK_BADGES) if current < b[0]), None)
+    return {
+        'current': current,
+        'best': best,
+        'badge': badge,
+        'next_badge': next_badge,
+        'progress_pct': round(current / next_badge[0] * 100) if next_badge else 100,
+    }
+
+@app.template_global()
+def streak_badge(user_id):
+    """Template helper: the clean streak badge shown next to a username.
+    Cached per request so authors appearing several times are scored once."""
+    cache = g.setdefault('streak_badges', {})
+    if user_id not in cache:
+        cache[user_id] = clean_streak(user_id)['badge']
+    return cache[user_id]
+
 # ----- Functions to be implemented are below
 # Coding Assignment #2
 
@@ -1222,12 +1323,61 @@ def user_risk_analysis(user_id):
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
-    
-    score = 0
 
-    return score;
+    user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if user is None:
+        return 0.0
 
-    
+    # Step 1: profile score
+    _, profile_score = moderate_content(user['profile'])
+
+    # Step 2: average post score (0 if no posts)
+    posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,)) or []
+    post_scores = [moderate_content(p['content'])[1] for p in posts]
+    average_post_score = sum(post_scores) / len(post_scores) if post_scores else 0.0
+
+    # Step 3: average comment score (0 if no comments)
+    comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,)) or []
+    comment_scores = [moderate_content(c['content'])[1] for c in comments]
+    average_comment_score = sum(comment_scores) / len(comment_scores) if comment_scores else 0.0
+
+    # Step 4: weighted combination
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+
+    # Step 5: account age multiplier
+    created_at = user['created_at']
+    if isinstance(created_at, str):
+        created_at = datetime.fromisoformat(created_at)
+    account_age_days = (datetime.utcnow() - created_at).days if created_at else 0
+
+    if account_age_days < 7:
+        user_risk_score = content_risk_score * 1.5
+    elif account_age_days < 30:
+        user_risk_score = content_risk_score * 1.2
+    else:
+        user_risk_score = content_risk_score
+
+    # Step 6: cap at 5.0
+    return min(5.0, user_risk_score)
+
+
+def _build_word_pattern(terms):
+    """Builds a case-insensitive, whole-word/phrase regex from a list of terms.
+    Longer terms come first so e.g. 'pissed off' wins over 'pissed'."""
+    escaped = sorted((re.escape(t) for t in terms), key=len, reverse=True)
+    # Lookarounds instead of \b so phrases starting/ending in non-word chars (e.g. '100% free') still work
+    return re.compile(r'(?<!\w)(?:' + '|'.join(escaped) + r')(?!\w)', re.IGNORECASE)
+
+TIER1_PATTERN = _build_word_pattern(TIER1_WORDS)
+TIER2_PATTERN = _build_word_pattern(TIER2_PHRASES)
+TIER3_PATTERN = _build_word_pattern(TIER3_WORDS)
+URL_PATTERN = re.compile(
+    r'\b(?:https?://|www\.)\S+'
+    r'|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|co|edu|gov|info|biz|me|ly|xyz|ru|uk|de|fi|eu)\b(?:/\S*)?',
+    re.IGNORECASE
+)
+
+
 # Assignment 2.1
 def moderate_content(content):
     """
@@ -1246,9 +1396,31 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
-    moderated_content = content
-    score = 0
-    
+    if not content:
+        return content or '', 0.0
+
+    # Stage 1.1: severe violations remove the whole content
+    if TIER1_PATTERN.search(content):
+        return "[content removed due to severe violation]", 5.0
+    if TIER2_PATTERN.search(content):
+        return "[content removed due to spam/scam policy]", 5.0
+
+    # Stage 1.2: scored violations & filtering
+    score = 0.0
+
+    # Rule 1.2.1: mask Tier 3 words, +2.0 each
+    moderated_content, tier3_count = TIER3_PATTERN.subn(lambda m: '*' * len(m.group(0)), content)
+    score += 2.0 * tier3_count
+
+    # Rule 1.2.2: remove links, +2.0 each
+    moderated_content, url_count = URL_PATTERN.subn('[link removed]', moderated_content)
+    score += 2.0 * url_count
+
+    # Rule 1.2.3: excessive capitalization (content not modified)
+    letters = [ch for ch in content if ch.isalpha()]
+    if len(letters) > 15 and sum(ch.isupper() for ch in letters) / len(letters) > 0.7:
+        score += 0.5
+
     return moderated_content, score
 
 # Coding Assignment #3
