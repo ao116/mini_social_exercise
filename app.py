@@ -249,6 +249,7 @@ def add_post():
         db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
                    (user_id, moderated_content))
         db.commit()
+        update_user_tasks(user_id)  # unlock challenges/badges right away
         flash('Your post was successfully created!', 'success')
     else:
         # This will catch empty posts or posts that were fully censored
@@ -919,37 +920,56 @@ def init_task_table():
                 start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 weekly_unlocked BOOLEAN DEFAULT 0,
                 monthly_unlocked BOOLEAN DEFAULT 0,
-                monthly_completed BOOLEAN DEFAULT 0
+                monthly_completed BOOLEAN DEFAULT 0,
+                daily_completed_at TIMESTAMP DEFAULT NULL,
+                weekly_completed_at TIMESTAMP DEFAULT NULL
             )
         ''')
-        
-        # 2. Safely add the new column for existing databases
-        try:
-            db.execute('ALTER TABLE user_tasks ADD COLUMN monthly_completed BOOLEAN DEFAULT 0')
-        except sqlite3.OperationalError:
-            # If the column already exists, SQLite throws an error. We just ignore it and move on.
-            pass
-            
+
+        # 2. Safely add the new columns for existing databases
+        # (daily_completed_at / weekly_completed_at remember when a challenge was finished,
+        #  so the next challenge only counts posts made after that moment)
+        for column in ['monthly_completed BOOLEAN DEFAULT 0',
+                       'daily_completed_at TIMESTAMP DEFAULT NULL',
+                       'weekly_completed_at TIMESTAMP DEFAULT NULL']:
+            try:
+                db.execute(f'ALTER TABLE user_tasks ADD COLUMN {column}')
+            except sqlite3.OperationalError:
+                # If the column already exists, SQLite throws an error. We just ignore it and move on.
+                pass
+
         db.commit()
     
-@app.route('/tasks')
-def tasks():
-    user_id = session.get('user_id')
-    if not user_id:
-        flash('You must be logged in to view tasks.', 'danger')
-        return redirect(url_for('login'))
-
+def update_user_tasks(user_id):
+    """Checks a user's daily/weekly/monthly challenges and saves any unlocks.
+    Called when the user creates a post and when the Tasks page is opened."""
     db = get_db()
-    
+
     task_data = query_db('SELECT * FROM user_tasks WHERE user_id = ?', (user_id,), one=True)
     if not task_data:
         db.execute('INSERT INTO user_tasks (user_id) VALUES (?)', (user_id,))
         db.commit()
-        task_data = {'weekly_unlocked': 0, 'monthly_unlocked': 0}
+        task_data = query_db('SELECT * FROM user_tasks WHERE user_id = ?', (user_id,), one=True)
 
     weekly_unlocked = task_data['weekly_unlocked']
     monthly_unlocked = task_data['monthly_unlocked']
-    
+    daily_completed_at = task_data['daily_completed_at']
+    weekly_completed_at = task_data['weekly_completed_at']
+    if isinstance(daily_completed_at, str):
+        daily_completed_at = datetime.strptime(daily_completed_at[:19], '%Y-%m-%d %H:%M:%S')
+    if isinstance(weekly_completed_at, str):
+        weekly_completed_at = datetime.strptime(weekly_completed_at[:19], '%Y-%m-%d %H:%M:%S')
+
+    # Unlocks saved before completion times existed are checked again under the new rule
+    if weekly_unlocked and not daily_completed_at:
+        weekly_unlocked = monthly_unlocked = 0
+        db.execute('UPDATE user_tasks SET weekly_unlocked = 0, monthly_unlocked = 0, monthly_completed = 0 WHERE user_id = ?', (user_id,))
+        db.commit()
+    elif monthly_unlocked and not weekly_completed_at:
+        monthly_unlocked = 0
+        db.execute('UPDATE user_tasks SET monthly_unlocked = 0, monthly_completed = 0 WHERE user_id = ?', (user_id,))
+        db.commit()
+
     windows = [False, False, False, False]
     weekly_windows = [False, False, False, False]
     monthly_windows = [False, False, False] # 3 months
@@ -998,7 +1018,9 @@ def tasks():
                 windows[i] = True
 
         if all(windows):
-            db.execute('UPDATE user_tasks SET weekly_unlocked = 1 WHERE user_id = ?', (user_id,))
+            daily_completed_at = post_time  # the post that completed the last window
+            db.execute('UPDATE user_tasks SET weekly_unlocked = 1, daily_completed_at = ? WHERE user_id = ?',
+                       (daily_completed_at.strftime('%Y-%m-%d %H:%M:%S'), user_id))
             db.commit()
             weekly_unlocked = 1
 
@@ -1013,6 +1035,10 @@ def tasks():
             post_time = post['created_at']
             if isinstance(post_time, str):
                 post_time = datetime.strptime(post_time, '%Y-%m-%d %H:%M:%S')
+
+            # Only posts made after the daily challenge was completed count
+            if post_time <= daily_completed_at:
+                continue
             
             if w_streak_start is None:
                 w_streak_start = post_time
@@ -1044,7 +1070,9 @@ def tasks():
                 weekly_windows[i] = True
                 
         if all(weekly_windows):
-            db.execute('UPDATE user_tasks SET monthly_unlocked = 1 WHERE user_id = ?', (user_id,))
+            weekly_completed_at = post_time  # the post that completed the last window
+            db.execute('UPDATE user_tasks SET monthly_unlocked = 1, weekly_completed_at = ? WHERE user_id = ?',
+                       (weekly_completed_at.strftime('%Y-%m-%d %H:%M:%S'), user_id))
             db.commit()
             monthly_unlocked = 1
 
@@ -1057,6 +1085,10 @@ def tasks():
             post_time = post['created_at']
             if isinstance(post_time, str):
                 post_time = datetime.strptime(post_time, '%Y-%m-%d %H:%M:%S')
+
+            # Only posts made after the weekly challenge was completed count
+            if post_time <= weekly_completed_at:
+                continue
             
             if m_streak_start is None:
                 m_streak_start = post_time
@@ -1091,105 +1123,21 @@ def tasks():
             db.execute('UPDATE user_tasks SET monthly_completed = 1 WHERE user_id = ?', (user_id,))
             db.commit()
 
+    return windows, weekly_windows, monthly_windows, weekly_unlocked, monthly_unlocked
+
+@app.route('/tasks')
+def tasks():
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to view tasks.', 'danger')
+        return redirect(url_for('login'))
+
+    windows, weekly_windows, monthly_windows, weekly_unlocked, monthly_unlocked = update_user_tasks(user_id)
+
     # --- AUTO-CHECK ALL USERS' TASKS BEFORE SHOWING STATS ---
     all_users = query_db('SELECT id FROM users')
     for u in all_users:
-        u_id = u['id']
-        
-        # Ensure user has a task row
-        t_row = query_db('SELECT * FROM user_tasks WHERE user_id = ?', (u_id,), one=True)
-        if not t_row:
-            db.execute('INSERT INTO user_tasks (user_id) VALUES (?)', (u_id,))
-            db.commit()
-            t_row = {'weekly_unlocked': 0, 'monthly_unlocked': 0, 'monthly_completed': 0}
-            
-        # If not fully completed, check their posts to see if they earned unlocks
-        if not t_row['monthly_completed']:
-            u_posts = query_db('SELECT created_at FROM posts WHERE user_id = ? ORDER BY created_at ASC', (u_id,))
-            if u_posts:
-                # 1. Check Daily (48h windows)
-                streak_start = None
-                h_window = -1
-                d_done = False
-                
-                for post in u_posts:
-                    p_time = post['created_at']
-                    if isinstance(p_time, str):
-                        p_time = datetime.strptime(p_time, '%Y-%m-%d %H:%M:%S')
-                    if streak_start is None:
-                        streak_start = p_time
-                        h_window = 0
-                        continue
-                    hours = (p_time - streak_start).total_seconds() / 3600.0
-                    w_idx = int(hours // 48)
-                    if w_idx == h_window + 1:
-                        h_window = w_idx
-                        if h_window == 3:
-                            break
-                    elif w_idx > h_window + 1:
-                        streak_start = p_time
-                        h_window = 0
-                
-                if h_window == 3:
-                    db.execute('UPDATE user_tasks SET weekly_unlocked = 1 WHERE user_id = ?', (u_id,))
-                    db.commit()
-                    d_done = True
-                
-                # 2. Check Weekly (168h windows) if daily was done
-                if t_row['weekly_unlocked'] == 1 or d_done:
-                    w_streak_start = None
-                    w_h_window = -1
-                    w_done = False
-                    
-                    for post in u_posts:
-                        p_time = post['created_at']
-                        if isinstance(p_time, str):
-                            p_time = datetime.strptime(p_time, '%Y-%m-%d %H:%M:%S')
-                        if w_streak_start is None:
-                            w_streak_start = p_time
-                            w_h_window = 0
-                            continue
-                        hours = (p_time - w_streak_start).total_seconds() / 3600.0
-                        w_idx = int(hours // 168)
-                        if w_idx == w_h_window + 1:
-                            w_h_window = w_idx
-                            if w_h_window == 3:
-                                break
-                        elif w_idx > w_h_window + 1:
-                            w_streak_start = p_time
-                            w_h_window = 0
-                            
-                    if w_h_window == 3:
-                        db.execute('UPDATE user_tasks SET monthly_unlocked = 1 WHERE user_id = ?', (u_id,))
-                        db.commit()
-                        w_done = True
-
-                    # 3. Check Monthly (720h windows) if weekly was done
-                    if t_row['monthly_unlocked'] == 1 or w_done:
-                        m_streak_start = None
-                        m_h_window = -1
-                        
-                        for post in u_posts:
-                            p_time = post['created_at']
-                            if isinstance(p_time, str):
-                                p_time = datetime.strptime(p_time, '%Y-%m-%d %H:%M:%S')
-                            if m_streak_start is None:
-                                m_streak_start = p_time
-                                m_h_window = 0
-                                continue
-                            hours = (p_time - m_streak_start).total_seconds() / 3600.0
-                            w_idx = int(hours // 720)
-                            if w_idx == m_h_window + 1:
-                                m_h_window = w_idx
-                                if m_h_window == 2:
-                                    break
-                            elif w_idx > m_h_window + 1:
-                                m_streak_start = p_time
-                                m_h_window = 0
-                                
-                        if m_h_window == 2:
-                            db.execute('UPDATE user_tasks SET monthly_completed = 1 WHERE user_id = ?', (u_id,))
-                            db.commit()
+        update_user_tasks(u['id'])
 
     # --- COMMUNITY STATS & USER PERCENTAGES ---
     total_users_count = query_db('SELECT COUNT(id) as cnt FROM users', one=True)['cnt']
@@ -1222,6 +1170,89 @@ def tasks():
                            user_has_daily=user_has_daily,
                            user_has_weekly=user_has_weekly,
                            user_has_monthly=user_has_monthly)
+
+# --- Assignment 2.3: Design Claim - Normative Statistics + Reputation Systems
+# Shows how common good behaviour is (community pulse) and rewards each user's
+# run of violation-free content (clean streak). Only good behaviour is put on
+# display, since showing many violations makes misbehaviour look normal.
+
+CLEAN_STREAK_BADGES = [  # (streak needed, icon, title), highest first
+    (100, '🏆', 'Community Pillar'),
+    (50, '🛡️', 'Guardian'),
+    (10, '🕊️', 'Peacekeeper'),
+]
+PULSE_CACHE_SECONDS = 300
+PULSE_MIN_CLEAN_PCT = 50  # below this the "norm" isn't the majority, so don't advertise it
+_pulse_cache = {'time': 0, 'data': None}
+
+def community_pulse():
+    """Returns the share of all posts/comments with no violations and the number of
+    members whose content is entirely clean. Cached, as it scores every item."""
+    now = time.time()
+    if _pulse_cache['data'] and now - _pulse_cache['time'] < PULSE_CACHE_SECONDS:
+        return _pulse_cache['data']
+
+    rows = query_db('''
+        SELECT user_id, content FROM posts
+        UNION ALL
+        SELECT user_id, content FROM comments
+    ''') or []
+
+    clean_items = 0
+    authors, authors_with_violations = set(), set()
+    for row in rows:
+        authors.add(row['user_id'])
+        if moderate_content(row['content'])[1] == 0:
+            clean_items += 1
+        else:
+            authors_with_violations.add(row['user_id'])
+
+    total = len(rows)
+    clean_pct = round(clean_items / total * 100) if total else 100
+    data = {
+        'clean_pct': clean_pct,
+        'clean_members': len(authors - authors_with_violations),
+        'show': clean_pct >= PULSE_MIN_CLEAN_PCT,
+    }
+    _pulse_cache.update(time=now, data=data)
+    return data
+
+def clean_streak(user_id):
+    """Returns the user's current and best run of consecutive violation-free
+    posts/comments, their current badge, and the next badge to aim for."""
+    rows = query_db('''
+        SELECT content, created_at FROM posts WHERE user_id = ?
+        UNION ALL
+        SELECT content, created_at FROM comments WHERE user_id = ?
+        ORDER BY created_at ASC
+    ''', (user_id, user_id)) or []
+
+    current = best = 0
+    for row in rows:
+        if moderate_content(row['content'])[1] == 0:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+
+    badge = next((b for b in CLEAN_STREAK_BADGES if current >= b[0]), None)
+    next_badge = next((b for b in reversed(CLEAN_STREAK_BADGES) if current < b[0]), None)
+    return {
+        'current': current,
+        'best': best,
+        'badge': badge,
+        'next_badge': next_badge,
+        'progress_pct': round(current / next_badge[0] * 100) if next_badge else 100,
+    }
+
+@app.template_global()
+def streak_badge(user_id):
+    """Template helper: the clean streak badge shown next to a username.
+    Cached per request so authors appearing several times are scored once."""
+    cache = g.setdefault('streak_badges', {})
+    if user_id not in cache:
+        cache[user_id] = clean_streak(user_id)['badge']
+    return cache[user_id]
 
 # --- Assignment 2.3: Design Claim - Normative Statistics + Reputation Systems
 # Shows how common good behaviour is (community pulse) and rewards each user's
@@ -1449,7 +1480,9 @@ def recommend(user_id, filter_following):
 
     return recommended_posts;
 
+# Runs on import too, so it also happens under `flask run` (Docker)
+init_task_table()
+
 if __name__ == '__main__':
-    init_task_table()
     app.run(debug=True, port=8080)
 

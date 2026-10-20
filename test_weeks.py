@@ -50,8 +50,12 @@ if __name__ == '__main__':
     conn.execute('DELETE FROM posts WHERE user_id = ? AND content LIKE "%test post%"', (USER_ID,))
     
     # 2. Reset the user's task progress. 
-    # We set weekly_unlocked to 1 so we can bypass the daily challenge for this test.
-    conn.execute('UPDATE user_tasks SET weekly_unlocked = 1, monthly_unlocked = 0 WHERE user_id = ?', (USER_ID,))
+    # We mark the daily challenge as completed just before the test posts, so we can bypass it for this test.
+    # (The weekly challenge only counts posts made after the daily one was completed.)
+    daily_done_at = (datetime.utcnow() - timedelta(days=29)).strftime('%Y-%m-%d %H:%M:%S')
+    conn.execute('''UPDATE user_tasks SET weekly_unlocked = 1, daily_completed_at = ?,
+                    monthly_unlocked = 0, weekly_completed_at = NULL, monthly_completed = 0
+                    WHERE user_id = ?''', (daily_done_at, USER_ID))
     
     conn.commit()
     conn.close()

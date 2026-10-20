@@ -56,7 +56,9 @@ if __name__ == '__main__':
     conn.execute('DELETE FROM posts WHERE user_id = ?', (USER_ID,))
     
     # 2. Reset the user's task unlock progress back to zero
-    conn.execute('UPDATE user_tasks SET weekly_unlocked = 0, monthly_unlocked = 0 WHERE user_id = ?', (USER_ID,))
+    conn.execute('''UPDATE user_tasks SET weekly_unlocked = 0, monthly_unlocked = 0, monthly_completed = 0,
+                    daily_completed_at = NULL, weekly_completed_at = NULL
+                    WHERE user_id = ?''', (USER_ID,))
     
     conn.commit()
     conn.close()
