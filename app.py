@@ -6,6 +6,8 @@ import json
 import sqlite3
 import hashlib
 import re
+import math
+import random
 import time
 from datetime import datetime
 
@@ -218,6 +220,8 @@ def feed():
     return render_template('feed.html.j2',
                            posts=posts_data,
                            pulse=community_pulse(),
+                           welcome_queue=welcome_queue(current_user_id),
+                           newcomer=newcomer_status(current_user_id),
                            my_streak=clean_streak(current_user_id) if current_user_id else None,
                            current_sort=sort,
                            current_show=show,
@@ -243,13 +247,22 @@ def add_post():
     # Pass the user's content through the moderation function
     moderated_content = content
 
+    # Newcomers can post once a day in their first week (Assignment 3.2, DC25)
+    wait = newcomer_post_wait(user_id)
+    if wait:
+        hours = max(1, round(wait.total_seconds() / 3600))
+        flash(f'New members can share one post per day during their first week. '
+              f'You can post again in about {hours} hour(s) - comments are always open!', 'info')
+        return redirect(url_for('feed'))
+
     # Basic validation to ensure post is not empty
     if moderated_content and moderated_content.strip():
         db = get_db()
-        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
+        cur = db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
+                         (user_id, moderated_content))
         db.commit()
         update_user_tasks(user_id)  # unlock challenges/badges right away
+        assign_welcomers(cur.lastrowid, user_id)  # Assignment 3.2, DC20
         flash('Your post was successfully created!', 'success')
     else:
         # This will catch empty posts or posts that were fully censored
@@ -1254,89 +1267,6 @@ def streak_badge(user_id):
         cache[user_id] = clean_streak(user_id)['badge']
     return cache[user_id]
 
-# --- Assignment 2.3: Design Claim - Normative Statistics + Reputation Systems
-# Shows how common good behaviour is (community pulse) and rewards each user's
-# run of violation-free content (clean streak). Only good behaviour is put on
-# display, since showing many violations makes misbehaviour look normal.
-
-CLEAN_STREAK_BADGES = [  # (streak needed, icon, title), highest first
-    (100, '🏆', 'Community Pillar'),
-    (50, '🛡️', 'Guardian'),
-    (10, '🕊️', 'Peacekeeper'),
-]
-PULSE_CACHE_SECONDS = 300
-PULSE_MIN_CLEAN_PCT = 50  # below this the "norm" isn't the majority, so don't advertise it
-_pulse_cache = {'time': 0, 'data': None}
-
-def community_pulse():
-    """Returns the share of all posts/comments with no violations and the number of
-    members whose content is entirely clean. Cached, as it scores every item."""
-    now = time.time()
-    if _pulse_cache['data'] and now - _pulse_cache['time'] < PULSE_CACHE_SECONDS:
-        return _pulse_cache['data']
-
-    rows = query_db('''
-        SELECT user_id, content FROM posts
-        UNION ALL
-        SELECT user_id, content FROM comments
-    ''') or []
-
-    clean_items = 0
-    authors, authors_with_violations = set(), set()
-    for row in rows:
-        authors.add(row['user_id'])
-        if moderate_content(row['content'])[1] == 0:
-            clean_items += 1
-        else:
-            authors_with_violations.add(row['user_id'])
-
-    total = len(rows)
-    clean_pct = round(clean_items / total * 100) if total else 100
-    data = {
-        'clean_pct': clean_pct,
-        'clean_members': len(authors - authors_with_violations),
-        'show': clean_pct >= PULSE_MIN_CLEAN_PCT,
-    }
-    _pulse_cache.update(time=now, data=data)
-    return data
-
-def clean_streak(user_id):
-    """Returns the user's current and best run of consecutive violation-free
-    posts/comments, their current badge, and the next badge to aim for."""
-    rows = query_db('''
-        SELECT content, created_at FROM posts WHERE user_id = ?
-        UNION ALL
-        SELECT content, created_at FROM comments WHERE user_id = ?
-        ORDER BY created_at ASC
-    ''', (user_id, user_id)) or []
-
-    current = best = 0
-    for row in rows:
-        if moderate_content(row['content'])[1] == 0:
-            current += 1
-            best = max(best, current)
-        else:
-            current = 0
-
-    badge = next((b for b in CLEAN_STREAK_BADGES if current >= b[0]), None)
-    next_badge = next((b for b in reversed(CLEAN_STREAK_BADGES) if current < b[0]), None)
-    return {
-        'current': current,
-        'best': best,
-        'badge': badge,
-        'next_badge': next_badge,
-        'progress_pct': round(current / next_badge[0] * 100) if next_badge else 100,
-    }
-
-@app.template_global()
-def streak_badge(user_id):
-    """Template helper: the clean streak badge shown next to a username.
-    Cached per request so authors appearing several times are scored once."""
-    cache = g.setdefault('streak_badges', {})
-    if user_id not in cache:
-        cache[user_id] = clean_streak(user_id)['badge']
-    return cache[user_id]
-
 # ----- Functions to be implemented are below
 # Coding Assignment #2
 
@@ -1455,6 +1385,15 @@ def moderate_content(content):
     return moderated_content, score
 
 # Coding Assignment #3
+# Common words that say nothing about a post's topic, ignored by recommend()
+RECOMMEND_STOPWORDS = set('''
+the and for are but not you all any can had her was one our out has have him his how its may new now
+old see two way who did get got let put say she too use that with this from they will what when your
+just like been were more some than them then there these into only also very about would could should
+their which while where after before because really think know going want make made much many most
+over such even here well back still good great love today time feel day people don't i'm it's can't
+'''.split())
+
 # Assignment 3.1
 def recommend(user_id, filter_following):
     """
@@ -1476,12 +1415,222 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    # Content-based filtering (TF-IDF keyword profile of the posts the user reacted to
+    # positively) plus a social boost for authors the user follows or already liked.
+    POSITIVE_REACTIONS = ('like', 'love', 'laugh', 'haha', 'wow')
+    FOLLOW_BOOST = 0.15
+    LIKED_AUTHOR_BOOST = 0.05   # per earlier liked post by the same author
+    MAX_LIKED_AUTHOR_BOOST = 0.15
+    COUNT = 5
 
-    return recommended_posts;
+    posts = query_db('''
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+               IFNULL(t.weekly_unlocked, 0) as daily_done,
+               IFNULL(t.monthly_unlocked, 0) as weekly_done,
+               IFNULL(t.monthly_completed, 0) as monthly_done,
+               (SELECT COUNT(*) FROM reactions r
+                WHERE r.post_id = p.id AND r.reaction_type IN (?, ?, ?, ?, ?)) as positive_count
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        LEFT JOIN user_tasks t ON u.id = t.user_id
+    ''', POSITIVE_REACTIONS) or []
+
+    followed = set()
+    reacted, liked = set(), set()
+    if user_id:
+        followed = {r['followed_id'] for r in query_db('SELECT followed_id FROM follows WHERE follower_id = ?', (user_id,))}
+        for r in query_db('SELECT post_id, reaction_type FROM reactions WHERE user_id = ?', (user_id,)):
+            reacted.add(r['post_id'])
+            if r['reaction_type'] in POSITIVE_REACTIONS:
+                liked.add(r['post_id'])
+
+    # Candidates: posts the user hasn't written or reacted to yet
+    candidates = [p for p in posts if p['user_id'] != user_id and p['id'] not in reacted]
+    if filter_following:
+        candidates = [p for p in candidates if p['user_id'] in followed]
+
+    liked_posts = [p for p in posts if p['id'] in liked]
+
+    if liked_posts:
+        # --- TF-IDF vectors for every post ---
+        def tokenize(text):
+            return [w for w in re.findall(r"[a-z']{3,}", text.lower()) if w not in RECOMMEND_STOPWORDS]
+
+        tokens = {p['id']: tokenize(p['content']) for p in posts}
+        doc_freq = collections.Counter(w for words in tokens.values() for w in set(words))
+        total_docs = len(posts)
+
+        def tfidf(words):
+            counts = collections.Counter(words)
+            return {w: c * math.log(total_docs / doc_freq[w]) for w, c in counts.items()}
+
+        def cosine(a, b):
+            dot = sum(v * b.get(w, 0) for w, v in a.items())
+            norm = math.sqrt(sum(v * v for v in a.values())) * math.sqrt(sum(v * v for v in b.values()))
+            return dot / norm if norm else 0.0
+
+        # User profile = sum of the TF-IDF vectors of the liked posts
+        profile = collections.Counter()
+        for p in liked_posts:
+            profile.update(tfidf(tokens[p['id']]))
+        liked_authors = collections.Counter(p['user_id'] for p in liked_posts)
+
+        def score(p):
+            s = cosine(tfidf(tokens[p['id']]), profile)
+            if p['user_id'] in followed:
+                s += FOLLOW_BOOST
+            s += min(MAX_LIKED_AUTHOR_BOOST, LIKED_AUTHOR_BOOST * liked_authors[p['user_id']])
+            return s
+    else:
+        # Cold start (no positive reactions yet): most liked posts, followed authors first
+        def score(p):
+            return (p['user_id'] in followed, p['positive_count'])
+
+    ranked = sorted(candidates, key=lambda p: (score(p), p['created_at']), reverse=True)
+
+    recommended_posts = []
+    for p in ranked:
+        # Don't recommend posts that moderation would remove
+        if moderate_content(p['content'])[1] >= 5:
+            continue
+        recommended_posts.append(p)
+        if len(recommended_posts) == COUNT:
+            break
+
+    recommended_posts.sort(key=lambda p: p['created_at'], reverse=True)
+    return recommended_posts
+
+# --- Assignment 3.2: Design Claims
+# DC20: newcomers' posts are assigned to well-behaved old-timers who are asked to welcome them
+#       (which also gives newcomers the friendly early interactions of DC18).
+# DC25: progressive access control - newcomers can post once a day in their first week,
+#       until they have shown they follow the rules with a few clean posts. Comments are never limited.
+
+NEWCOMER_DAYS = 7               # an account younger than this is a newcomer
+WELCOMER_MIN_AGE_DAYS = 30      # welcomers must be old-timers...
+WELCOMER_MAX_RISK = 1.0         # ...with no risk (user_risk_analysis)...
+WELCOMERS_PER_POST = 2          # ...and a clean streak badge
+NEWCOMER_POST_INTERVAL = timedelta(hours=24)
+NEWCOMER_CLEAN_POSTS_TO_UNLOCK = 3
+
+def init_newcomer_tables():
+    """Creates the table that stores which old-timer should welcome which newcomer post."""
+    with app.app_context():
+        db = get_db()
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS welcome_assignments (
+                post_id INTEGER NOT NULL,
+                welcomer_id INTEGER NOT NULL,
+                assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (post_id, welcomer_id)
+            )
+        ''')
+        db.commit()
+
+def account_age_days(user_id):
+    user = query_db('SELECT created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user or not user['created_at']:
+        return None
+    created_at = user['created_at']
+    if isinstance(created_at, str):
+        created_at = datetime.strptime(created_at[:19], '%Y-%m-%d %H:%M:%S')
+    return (datetime.utcnow() - created_at).total_seconds() / 86400
+
+@app.template_global()
+def is_newcomer(user_id):
+    """Template helper for the "New member" tag. Cached per request."""
+    cache = g.setdefault('newcomers', {})
+    if user_id not in cache:
+        age = account_age_days(user_id)
+        cache[user_id] = age is not None and age < NEWCOMER_DAYS
+    return cache[user_id]
+
+def assign_welcomers(post_id, author_id):
+    """DC20: gives a newcomer's post to randomly chosen well-behaved old-timers."""
+    if not is_newcomer(author_id):
+        return
+    candidates = query_db('''
+        SELECT id FROM users
+        WHERE id != ? AND username != 'admin' AND created_at <= datetime('now', ?)
+    ''', (author_id, f'-{WELCOMER_MIN_AGE_DAYS} days')) or []
+    candidate_ids = [c['id'] for c in candidates]
+    random.shuffle(candidate_ids)
+
+    db = get_db()
+    chosen = 0
+    for candidate_id in candidate_ids:
+        # Cheapest check first; stop as soon as we have enough welcomers
+        if clean_streak(candidate_id)['badge'] and user_risk_analysis(candidate_id) < WELCOMER_MAX_RISK:
+            db.execute('INSERT OR IGNORE INTO welcome_assignments (post_id, welcomer_id) VALUES (?, ?)',
+                       (post_id, candidate_id))
+            chosen += 1
+            if chosen == WELCOMERS_PER_POST:
+                break
+    db.commit()
+
+def welcome_queue(user_id):
+    """Newcomer posts assigned to this user that nobody has replied to yet."""
+    if not user_id:
+        return []
+    rows = query_db('''
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+        FROM welcome_assignments w
+        JOIN posts p ON p.id = w.post_id
+        JOIN users u ON u.id = p.user_id
+        WHERE w.welcomer_id = ?
+          AND NOT EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id AND c.user_id != p.user_id)
+        ORDER BY p.created_at DESC
+        LIMIT 5
+    ''', (user_id,)) or []
+    queue = []
+    for row in rows:
+        post = dict(row)
+        post['content'], _ = moderate_content(post['content'])
+        queue.append(post)
+    return queue
+
+@app.template_global()
+def is_welcomer(user_id):
+    return query_db('SELECT 1 FROM welcome_assignments WHERE welcomer_id = ? LIMIT 1', (user_id,), one=True) is not None
+
+def newcomer_post_wait(user_id):
+    """DC25: returns how long a newcomer must still wait before their next post, or None."""
+    age = account_age_days(user_id)
+    if age is None or age >= NEWCOMER_DAYS:
+        return None
+    posts = query_db('SELECT content, created_at FROM posts WHERE user_id = ? ORDER BY created_at DESC', (user_id,)) or []
+    clean_posts = sum(1 for p in posts if moderate_content(p['content'])[1] == 0)
+    if not posts or clean_posts >= NEWCOMER_CLEAN_POSTS_TO_UNLOCK:
+        return None
+    last_post = posts[0]['created_at']
+    if isinstance(last_post, str):
+        last_post = datetime.strptime(last_post[:19], '%Y-%m-%d %H:%M:%S')
+    wait = NEWCOMER_POST_INTERVAL - (datetime.utcnow() - last_post)
+    return wait if wait.total_seconds() > 0 else None
+
+def newcomer_status(user_id):
+    """Everything the feed shows a newcomer: their posting limit and how many members welcomed them."""
+    if not user_id or not is_newcomer(user_id):
+        return None
+    posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,)) or []
+    clean_posts = sum(1 for p in posts if moderate_content(p['content'])[1] == 0)
+    wait = newcomer_post_wait(user_id)
+    welcomers = query_db('''
+        SELECT COUNT(DISTINCT c.user_id) as cnt FROM comments c
+        JOIN posts p ON p.id = c.post_id
+        WHERE p.user_id = ? AND c.user_id != ?
+    ''', (user_id, user_id), one=True)['cnt']
+    return {
+        'days_left': max(1, round(NEWCOMER_DAYS - account_age_days(user_id))),
+        'limit_lifted': clean_posts >= NEWCOMER_CLEAN_POSTS_TO_UNLOCK,
+        'clean_posts_needed': max(0, NEWCOMER_CLEAN_POSTS_TO_UNLOCK - clean_posts),
+        'wait_hours': None if wait is None else max(1, round(wait.total_seconds() / 3600)),
+        'welcomed_by': welcomers,
+    }
 
 # Runs on import too, so it also happens under `flask run` (Docker)
 init_task_table()
+init_newcomer_tables()
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

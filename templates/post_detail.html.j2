@@ -1,6 +1,6 @@
 {% extends "base.html.j2" %}
 {% block content %}
-{% from "macros/user_macros.html.j2" import user_display, streak_badge_icon %}
+{% from "macros/user_macros.html.j2" import user_display, streak_badge_icon, newcomer_tag %}
 
 <div class="col-md-8 mx-auto pt-4">
   <div class="card shadow-sm">
@@ -16,7 +16,7 @@
           {% elif post.daily_done %}
               <span class="ms-1" title="Fresh Starter (Daily Completed)">🌱</span>
           {% endif %}
-          {{ streak_badge_icon(post.user_id) }}
+          {{ streak_badge_icon(post.user_id) }} {{ newcomer_tag(post.user_id) }}
         </h3>
         {% if session.get('user_id') == post.user_id %}
         <div class="d-flex align-items-center">
@@ -99,7 +99,7 @@
                 {% elif comment.daily_done %}
                     <span class="ms-1" title="Fresh Starter">🌱</span>
                 {% endif %}
-                {{ streak_badge_icon(comment.user_id) }}
+                {{ streak_badge_icon(comment.user_id) }} {{ newcomer_tag(comment.user_id) }}
               </div>
 
               <p class="mb-0">{{ comment.content }}</p>

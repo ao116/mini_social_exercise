@@ -14,3 +14,9 @@
     <span class="ms-1" title="{{ badge[2] }}: {{ badge[0] }}+ posts & comments in a row without violations">{{ badge[1] }}</span>
   {% endif %}
 {% endmacro %}
+
+{% macro newcomer_tag(user_id) %}
+  {% if is_newcomer(user_id) %}
+    <span class="badge bg-info text-dark ms-1" title="Joined less than a week ago - say hi and be kind!">👋 New member</span>
+  {% endif %}
+{% endmacro %}
